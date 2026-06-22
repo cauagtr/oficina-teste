@@ -62,9 +62,14 @@ th{font-size:12px;text-transform:uppercase;color:#6b7280}
 .valor-wrap{display:flex;align-items:center;gap:5px;white-space:nowrap}
 .valor-wrap span{font-weight:800;color:#111827}
 .valor-wrap input{min-width:105px}
+.sync-status{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:800;background:#ecfdf5;color:#166534;padding:7px 10px;border-radius:999px;margin-right:10px}
+.sync-status.offline{background:#fef3c7;color:#92400e}
+.sync-status.error{background:#fee2e2;color:#991b1b}
+.header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 @media(max-width:950px){aside{position:relative;width:100%}main{margin-left:0}.cards,.grid,.grid2,.item-row{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 
@@ -105,7 +110,11 @@ th{font-size:12px;text-transform:uppercase;color:#6b7280}
     <h1 id="titulo">Dashboard</h1>
     <p class="muted">Voltamos para uma versão mais simples, com orçamento rápido e financeiro editável.</p>
   </div>
-  <button class="gray" onclick="sair()">Sair</button>
+  <div class="header-actions">
+    <span id="syncStatus" class="sync-status offline">Supabase: carregando...</span>
+    <button class="gray" onclick="sincronizarAgora()">Sincronizar</button>
+    <button class="gray" onclick="sair()">Sair</button>
+  </div>
 </header>
 
 <section id="dashboard" class="section active">
@@ -419,23 +428,109 @@ const usuariosSistema = [
   {cpf:'marcelo', senha:'dubis123', nome:'Marcelo'}
 ];
 
-function carregarDadosSalvos(){
+const SUPABASE_URL = 'https://zjctvfmmherdeujvcubu.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpqY3R2Zm1taGVyZGV1anZjdWJ1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxMzExNTMsImV4cCI6MjA5NzcwNzE1M30.VwCB_tbIrSOqx32rKDJSD7-Mzk8ANNmaNbr6TARA5VY';
+const SUPABASE_STATE_ID = 'dubisSistemaInicial';
+const supabaseClient = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+let salvandoSupabaseTimer = null;
+let ultimaSincronizacao = null;
+
+function pacoteDados(){
+  return {quotes, serviceOrders, clients, finance, entradas, saidas, funcionarios, servicosConcluidos};
+}
+
+function aplicarDados(saved){
+  if(!saved) return;
+  if(saved.quotes) quotes = saved.quotes;
+  if(saved.serviceOrders) serviceOrders = saved.serviceOrders;
+  if(saved.clients) clients = saved.clients;
+  if(saved.finance) finance = saved.finance;
+  if(saved.funcionarios) funcionarios = saved.funcionarios;
+  if(saved.servicosConcluidos) servicosConcluidos = saved.servicosConcluidos;
+  if(saved.entradas) entradas = saved.entradas;
+  if(saved.saidas) saidas = saved.saidas;
+}
+
+function atualizarStatusSupabase(texto, tipo='ok'){
+  const el = document.getElementById('syncStatus');
+  if(!el) return;
+  el.innerText = texto;
+  el.className = 'sync-status' + (tipo === 'ok' ? '' : ' ' + tipo);
+}
+
+async function carregarDadosSalvos(){
   try{
-    const saved = JSON.parse(localStorage.getItem('dubisSistemaInicial') || '{}');
-    if(saved.quotes) quotes = saved.quotes;
-    if(saved.serviceOrders) serviceOrders = saved.serviceOrders;
-    if(saved.clients) clients = saved.clients;
-    if(saved.finance) finance = saved.finance;
-    if(saved.funcionarios) funcionarios = saved.funcionarios;
-    if(saved.servicosConcluidos) servicosConcluidos = saved.servicosConcluidos;
-    if(saved.servicosConcluidos) servicosConcluidos = saved.servicosConcluidos;
-    if(saved.entradas) entradas = saved.entradas;
-    if(saved.saidas) saidas = saved.saidas;
+    const local = JSON.parse(localStorage.getItem(SUPABASE_STATE_ID) || '{}');
+    aplicarDados(local);
   }catch(e){}
+
+  if(!supabaseClient){
+    atualizarStatusSupabase('Supabase: offline', 'offline');
+    return;
+  }
+
+  try{
+    atualizarStatusSupabase('Supabase: carregando...', 'offline');
+    const { data, error } = await supabaseClient
+      .from('app_state')
+      .select('data,updated_at')
+      .eq('id', SUPABASE_STATE_ID)
+      .maybeSingle();
+
+    if(error) throw error;
+
+    if(data && data.data){
+      aplicarDados(data.data);
+      localStorage.setItem(SUPABASE_STATE_ID, JSON.stringify(data.data));
+      ultimaSincronizacao = data.updated_at;
+      atualizarStatusSupabase('Supabase: sincronizado');
+    }else{
+      await salvarDadosSupabase();
+      atualizarStatusSupabase('Supabase: criado');
+    }
+  }catch(e){
+    console.error('Erro ao carregar dados do Supabase:', e);
+    atualizarStatusSupabase('Supabase: erro', 'error');
+  }
+}
+
+async function salvarDadosSupabase(){
+  if(!supabaseClient) return;
+  const payload = pacoteDados();
+  const { error } = await supabaseClient
+    .from('app_state')
+    .upsert({id: SUPABASE_STATE_ID, data: payload, updated_at: new Date().toISOString()}, {onConflict:'id'});
+  if(error) throw error;
+  ultimaSincronizacao = new Date().toISOString();
 }
 
 function salvarDados(){
-  localStorage.setItem('dubisSistemaInicial', JSON.stringify({quotes, serviceOrders, clients, finance, entradas, saidas, funcionarios, servicosConcluidos}));
+  const payload = pacoteDados();
+  localStorage.setItem(SUPABASE_STATE_ID, JSON.stringify(payload));
+  atualizarStatusSupabase('Supabase: salvando...', 'offline');
+  clearTimeout(salvandoSupabaseTimer);
+  salvandoSupabaseTimer = setTimeout(async()=>{
+    try{
+      await salvarDadosSupabase();
+      atualizarStatusSupabase('Supabase: salvo');
+    }catch(e){
+      console.error('Erro ao salvar dados no Supabase:', e);
+      atualizarStatusSupabase('Supabase: erro ao salvar', 'error');
+    }
+  }, 700);
+}
+
+async function sincronizarAgora(){
+  try{
+    atualizarStatusSupabase('Supabase: sincronizando...', 'offline');
+    await salvarDadosSupabase();
+    atualizarStatusSupabase('Supabase: sincronizado');
+    alert('Dados sincronizados com o Supabase.');
+  }catch(e){
+    console.error(e);
+    atualizarStatusSupabase('Supabase: erro', 'error');
+    alert('Não foi possível sincronizar. Confira se a tabela app_state e as políticas RLS foram criadas no Supabase.');
+  }
 }
 
 function dataHojeISO(){
@@ -472,7 +567,7 @@ function moeda(v){return Number(v||0).toLocaleString('pt-BR',{style:'currency',c
 function escapeHtml(text){return String(text||'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
 function dataBR(iso){if(!iso)return '-'; return new Date(iso+'T00:00:00').toLocaleDateString('pt-BR')}
 
-function entrar(){
+async function entrar(){
   const user = usuariosSistema.find(u => u.cpf === cpf.value.trim() && u.senha === senha.value.trim());
   if(!user){
     loginErro.style.display='block';
@@ -481,7 +576,7 @@ function entrar(){
   loginErro.style.display='none';
   login.style.display='none';
   app.style.display='block';
-  carregarDadosSalvos();
+  await carregarDadosSalvos();
   limparOrcamentosAntigos();
   atualizarDashboard();
   renderQuotes(); renderOS(); renderFinanceiro(window.filtroAtual||'todos'); renderEntradas(); renderSaidas(); renderClientes(); renderFuncionarios(); renderConcluidos();
@@ -1415,7 +1510,7 @@ function atualizarResumoFinanceiro(filtro='todos'){
   if(document.getElementById('finVencidas')) finVencidas.innerText=moeda(vencidas);
 }
 
-carregarDadosSalvos(); limparOrcamentosAntigos(); renderQuotes(); renderOS(); renderFinanceiro('todos'); renderEntradas(); renderSaidas(); renderClientes(); renderFuncionarios(); renderConcluidos(); atualizarDashboard(); salvarDados();
+(async function iniciarSistema(){ await carregarDadosSalvos(); limparOrcamentosAntigos(); renderQuotes(); renderOS(); renderFinanceiro('todos'); renderEntradas(); renderSaidas(); renderClientes(); renderFuncionarios(); renderConcluidos(); atualizarDashboard(); salvarDados(); })();
 </script>
 </body>
 </html>
